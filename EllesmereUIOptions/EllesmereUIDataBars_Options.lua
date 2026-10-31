@@ -3153,25 +3153,14 @@ initFrame:SetScript("OnEvent", function(self)
                     "What right click on the Travel block uses. Defaults to Random Hearthstone.",
                     "What middle click on the Travel block uses. None leaves middle click unused.",
                 }
-                typeRows = {
-                    { type = "dropdown", text = "Text",
-                      tooltip = "What the Travel block shows next to its icon. The timer is the shared hearthstone cooldown; other travel items keep their own cooldowns in the tooltip.",
-                      values = { location = "Bind Location", smart = "Cooldown, Else Location",
-                                 both = "Location and Cooldown", cooldown = "Cooldown Only", none = "None" },
-                      order = { "location", "smart", "both", "cooldown", "none" },
-                      getValue = function() return s.textMode or "location" end,
-                      setValue = function(v)
-                          if v == "location" then s.textMode = nil else s.textMode = v end
-                          Apply()
-                      end },
-                    MkToggle("Show Click Destinations", "showDestinations",
-                        "Also shows where each click goes when it is set to something other than a hearthstone, e.g. Valdrakken / Dalaran. Hearthstone clicks show the bind location once."),
-                }
-                -- Destinations only feed the location modes.
-                typeRows[2].disabled = function()
-                    return s.textMode == "cooldown" or s.textMode == "none"
-                end
-                typeRows[2].disabledTooltip = "Text: a mode that shows the location"
+                -- One row per click: its choice on the left, its bar text on the
+                -- right (textLeft / textRight / textMiddle; defaults come from
+                -- ns.TravelClickTextMode, which also reads the legacy settings).
+                local TEXT_KEYS = { "textLeft", "textRight", "textMiddle" }
+                local TEXT_VALUES = { location = "Destination", smart = "Cooldown, Else Destination",
+                                      both = "Destination and Cooldown", cooldown = "Cooldown Only", none = "None" }
+                local TEXT_ORDER = { "location", "smart", "both", "cooldown", "none" }
+                typeRows = {}
                 for btn = 1, 3 do
                     local vals, ord = BuildClickValues(btn)
                     typeRows[#typeRows + 1] = { type = "dropdown", text = CLICK_LABELS[btn],
@@ -3183,8 +3172,19 @@ initFrame:SetScript("OnEvent", function(self)
                           if btn == 1 then s.randomizeHs = (v == "random") end
                           Apply()
                       end }
+                    typeRows[#typeRows + 1] = { type = "dropdown", text = CLICK_LABELS[btn] .. " Text",
+                      tooltip = "What the bar shows for this click: where it goes, its own cooldown (the hearthstone's for hearthstone choices), both, or nothing. Parts from several clicks are joined with /.",
+                      values = TEXT_VALUES, order = TEXT_ORDER,
+                      getValue = function()
+                          if ns.TravelClickTextMode then return ns.TravelClickTextMode(s, btn) end
+                          return btn == 1 and "location" or "none"
+                      end,
+                      setValue = function(v) s[TEXT_KEYS[btn]] = v; Apply() end,
+                      disabled = function() return ChoiceOf(btn) == "none" end,
+                      disabledTooltip = CLICK_LABELS[btn] .. ": something other than None" }
                 end
-                if travelIconCfg then table.insert(typeRows, 1, travelIconCfg) end
+                -- Icon color moves to the end, pairing with the shared Icon Style row.
+                if travelIconCfg then typeRows[#typeRows + 1] = travelIconCfg end
             elseif b.type == "micromenu" then
                 -- Align Content returns here as a type row (its shared-row
                 -- slot hosts the Enable Text toggle instead): anchors the

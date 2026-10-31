@@ -304,48 +304,6 @@ local function TravelChoiceDestination(choice)
     return TravelEntryName(choice) or true
 end
 
--- Bar text by settings.textMode: "location" (nil, default), "smart" (cooldown while
--- cooling, else location), "both", "cooldown" or "none". cd/cdKnown come from
--- TravelGetPrimaryCooldown; an unknown (secret) cooldown shows no time. With
--- settings.showDestinations, the location part lists each click's destination
--- (left, right, middle; duplicates dropped), the hearthstone timer staying on the
--- bind location entry.
-local _destParts, _destSeen = {}, {}
-local function TravelBarText(dt, bind, cd, cdKnown)
-    local mode = dt.textMode
-    if mode == "none" then return "" end
-    local cdStr = cdKnown and ns.FormatCooldown(cd) or nil
-    if mode == "cooldown" then
-        if cdStr then return cdStr end
-        return cdKnown and L["READY"] or "-"
-    end
-    local hsPart = bind
-    if mode == "smart" then
-        hsPart = cdStr or bind
-    elseif mode == "both" and cdStr then
-        hsPart = bind .. " " .. cdStr
-    end
-    if not dt.showDestinations then return hsPart end
-    local n = 0
-    for k in pairs(_destSeen) do _destSeen[k] = nil end
-    for btn = 1, 3 do
-        local dest = TravelChoiceDestination(TravelClickChoice(dt, btn))
-        if dest ~= nil and not _destSeen[dest] then
-            _destSeen[dest] = true
-            n = n + 1
-            _destParts[n] = (dest == true) and hsPart or dest
-        end
-    end
-    for i = n + 1, #_destParts do _destParts[i] = nil end
-    if n == 0 then return hsPart end
-    return table.concat(_destParts, " / ", 1, n)
-end
-
--- True when the bar text changes every second while cooling.
-local function TravelTextShowsTimer(mode)
-    return mode == "smart" or mode == "both" or mode == "cooldown"
-end
-
 -- Tooltip click-hint text for a choice.
 local function TravelChoiceLabel(choice)
     if choice == "random" then return L["RANDOM_HEARTHSTONE"] end
@@ -398,6 +356,95 @@ local function TravelGetPrimaryCooldown()
         end
     end
     return TravelGetRemainingCooldown(travelPrimaryHearthId, false)
+end
+
+-- Per-click bar text: settings.textLeft / textRight / textMiddle, each one of
+-- "location" (the click's destination), "smart" (its cooldown while cooling, else
+-- the destination), "both", "cooldown" or "none". Defaults: left shows its
+-- destination, right and middle nothing (the original bind-location-only bar).
+-- The legacy single textMode / showDestinations settings seed those defaults.
+local TEXT_KEYS = { "textLeft", "textRight", "textMiddle" }
+local function TravelClickTextMode(dt, btn)
+    local m = dt[TEXT_KEYS[btn]]
+    if m ~= nil then return m end
+    if btn == 1 then return dt.textMode or "location" end
+    return dt.showDestinations and "location" or "none"
+end
+ns.TravelClickTextMode = TravelClickTextMode
+
+local function TravelAnyTimerText(dt)
+    for btn = 1, 3 do
+        local m = TravelClickTextMode(dt, btn)
+        if m == "smart" or m == "both" or m == "cooldown" then return true end
+    end
+    return false
+end
+
+-- House-visit cooldown: remaining, known. A pending return trip reads as ready.
+local function TravelHouseCooldown()
+    if TravelCanReturnHome() then return 0, true end
+    local info = C_Housing and C_Housing.GetVisitCooldownInfo and C_Housing.GetVisitCooldownInfo()
+    if not info or not info.isEnabled then return 0, true end
+    if issecretvalue(info.startTime) or issecretvalue(info.duration) then return 0, false end
+    local rem = 0
+    if (info.duration or 0) > 0 and (info.startTime or 0) > 0 then
+        rem = max(0, info.startTime + info.duration - GetTime())
+    end
+    return rem, true
+end
+
+-- Cooldown of what a click fires: its own for travel entries and houses, the
+-- shared hearthstone one for hearthstone choices and fallbacks.
+local function TravelChoiceCooldown(choice)
+    local houseGuid = TravelHouseGuid(choice)
+    if houseGuid then
+        if TravelFindHouse(houseGuid) then return TravelHouseCooldown() end
+        return TravelGetPrimaryCooldown()
+    end
+    if type(choice) == "number" and TRAVEL_EXTRA_SET[choice] then
+        local kind = TravelExtraKind(choice)
+        if kind then return TravelGetRemainingCooldown(choice, kind == "spell") end
+    end
+    return TravelGetPrimaryCooldown()
+end
+
+-- Bar text: each click's part (left, right, middle) joined with " / ", identical
+-- parts once. Returns text, timerShown (a shown timer is counting down).
+local _textParts = {}
+local function TravelBarText(dt, bind)
+    local n, timer = 0, false
+    for btn = 1, 3 do
+        local mode = TravelClickTextMode(dt, btn)
+        local choice = TravelClickChoice(dt, btn)
+        if mode ~= "none" and choice ~= "none" then
+            local dest = TravelChoiceDestination(choice)
+            if dest == true or dest == nil then dest = bind end
+            local part = dest
+            if mode ~= "location" then
+                local cd, known = TravelChoiceCooldown(choice)
+                local cdStr = known and ns.FormatCooldown(cd) or nil
+                if cdStr then timer = true end
+                if mode == "smart" then
+                    part = cdStr or dest
+                elseif mode == "both" then
+                    part = cdStr and (dest .. " " .. cdStr) or dest
+                else
+                    part = cdStr or (known and L["READY"] or "-")
+                end
+            end
+            local dup = false
+            for i = 1, n do
+                if _textParts[i] == part then dup = true; break end
+            end
+            if not dup then
+                n = n + 1
+                _textParts[n] = part
+            end
+        end
+    end
+    for i = n + 1, #_textParts do _textParts[i] = nil end
+    if n == 0 then return "", timer end
+    return table.concat(_textParts, " / ", 1, n), timer
 end
 
 local function TravelResolveMythicId(idOrTable)
@@ -744,7 +791,8 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         -- Bar text per the Text setting (location by default); the full cooldown
         -- list lives in the tooltip. On cooldown (or an unknown/secret one) it dims to gray.
         local cd, cdKnown = TravelGetPrimaryCooldown()
-        local location = TravelBarText(D(), GetBindLocation() or "?", cd, cdKnown)
+        local location, barTimer = TravelBarText(D(), GetBindLocation() or "?")
+        inst._barTimer = barTimer
         if isSide then
             local slotW = VSlotW(inst)
             local innerW = max(30, slotW - 8)
@@ -757,7 +805,7 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         hearthText:SetText(location)
 
         inst._lastCooling = (not cdKnown) or cd > 0
-        TravelSyncTicker(mouseOver or inst._lastCooling)
+        TravelSyncTicker(mouseOver or inst._lastCooling or barTimer)
 
         if mouseOver then
             local ar, ag, ab = ns.GetAccent()
@@ -836,8 +884,8 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         if cooling ~= inst._lastCooling then
             inst._lastCooling = cooling
             inst:Refresh()
-        elseif cooling and pKnown and TravelTextShowsTimer(D().textMode) then
-            -- Timer text on the bar: repaint each second while cooling.
+        elseif inst._barTimer then
+            -- A click's timer is on the bar: repaint each second while it counts.
             inst:Refresh()
         elseif not cooling and not mouseOver then
             -- Settled ready with no edge to paint: nothing left to watch.
@@ -872,7 +920,11 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             -- one): never invalidates the hearthstone pick, and while the
             -- ticker already runs there is nothing to learn. One probe on a
             -- start edge re-arms the tick; zero fires standing idle.
-            if not ticking then TravelTick() end
+            -- A per-click timer may belong to a travel entry the primary probe does
+            -- not watch, so with timer text on, a full Refresh re-reads them all.
+            if not ticking then
+                if TravelAnyTimerText(D()) and not InCombatLockdown() then self:Refresh() else TravelTick() end
+            end
             return
         end
         ns.TravelInvalidateHearthCache()
