@@ -3147,7 +3147,14 @@ initFrame:SetScript("OnEvent", function(self)
                           if v == "location" then s.textMode = nil else s.textMode = v end
                           Apply()
                       end },
+                    MkToggle("Show Click Destinations", "showDestinations",
+                        "Also shows where each click goes when it is set to something other than a hearthstone, e.g. Valdrakken / Dalaran. Hearthstone clicks show the bind location once."),
                 }
+                -- Destinations only feed the location modes.
+                typeRows[2].disabled = function()
+                    return s.textMode == "cooldown" or s.textMode == "none"
+                end
+                typeRows[2].disabledTooltip = "Text: a mode that shows the location"
                 for btn = 1, 3 do
                     local vals, ord = BuildClickValues(btn)
                     typeRows[#typeRows + 1] = { type = "dropdown", text = CLICK_LABELS[btn],

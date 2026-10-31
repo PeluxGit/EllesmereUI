@@ -206,18 +206,67 @@ local function TravelClickChoice(dt, btn)
 end
 ns.TravelClickChoice = TravelClickChoice
 
+-- Short bar destinations for travel entries: Blizzard's localized string when the
+-- client has one, else English. Entries not listed use their item/spell name;
+-- Astral Recall goes to the bind point, so it counts as a hearthstone.
+local TRAVEL_DESTINATIONS = {
+    [140192] = { "DUNGEON_FLOOR_DALARANCITY1", "Dalaran" },
+    [253629] = { nil, "Arcantina" },
+    [110560] = { "GARRISON_LOCATION_TOOLTIP", "Garrison" },
+    [193753] = { "ORDER_HALL_DRUID", "The Dreamgrove" },
+    [18960]  = { nil, "Moonglade" },
+    [50977]  = { "ORDER_HALL_DEATHKNIGHT", "Acherus" },
+    [193759] = { "ORDER_HALL_MAGE", "Hall of the Guardian" },
+    [126892] = { "ORDER_HALL_MONK", "Peak of Serenity" },
+}
+
+-- Destination of a click choice: true for the bind location (any hearthstone,
+-- random, Astral Recall, or a pick no longer usable, which falls back to the
+-- hearthstone), a name string for a travel entry, nil for "none".
+local function TravelChoiceDestination(choice)
+    if choice == "none" then return nil end
+    if type(choice) ~= "number" or choice == 556 then return true end
+    if not TRAVEL_EXTRA_SET[choice] or not TravelExtraKind(choice) then return true end
+    local d = TRAVEL_DESTINATIONS[choice]
+    if d then return (d[1] and _G[d[1]]) or d[2] end
+    return TravelEntryName(choice) or true
+end
+
 -- Bar text by settings.textMode: "location" (nil, default), "smart" (cooldown while
 -- cooling, else location), "both", "cooldown" or "none". cd/cdKnown come from
--- TravelGetPrimaryCooldown; an unknown (secret) cooldown shows no time.
-local function TravelBarText(mode, location, cd, cdKnown)
+-- TravelGetPrimaryCooldown; an unknown (secret) cooldown shows no time. With
+-- settings.showDestinations, the location part lists each click's destination
+-- (left, right, middle; duplicates dropped), the hearthstone timer staying on the
+-- bind location entry.
+local _destParts, _destSeen = {}, {}
+local function TravelBarText(dt, bind, cd, cdKnown)
+    local mode = dt.textMode
     if mode == "none" then return "" end
-    if mode == nil or mode == "location" then return location end
     local cdStr = cdKnown and ns.FormatCooldown(cd) or nil
-    if mode == "smart" then return cdStr or location end
-    if mode == "both" then return cdStr and (location .. " " .. cdStr) or location end
-    -- "cooldown"
-    if cdStr then return cdStr end
-    return cdKnown and L["READY"] or "-"
+    if mode == "cooldown" then
+        if cdStr then return cdStr end
+        return cdKnown and L["READY"] or "-"
+    end
+    local hsPart = bind
+    if mode == "smart" then
+        hsPart = cdStr or bind
+    elseif mode == "both" and cdStr then
+        hsPart = bind .. " " .. cdStr
+    end
+    if not dt.showDestinations then return hsPart end
+    local n = 0
+    for k in pairs(_destSeen) do _destSeen[k] = nil end
+    for btn = 1, 3 do
+        local dest = TravelChoiceDestination(TravelClickChoice(dt, btn))
+        if dest ~= nil and not _destSeen[dest] then
+            _destSeen[dest] = true
+            n = n + 1
+            _destParts[n] = (dest == true) and hsPart or dest
+        end
+    end
+    for i = n + 1, #_destParts do _destParts[i] = nil end
+    if n == 0 then return hsPart end
+    return table.concat(_destParts, " / ", 1, n)
 end
 
 -- True when the bar text changes every second while cooling.
@@ -565,7 +614,7 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         -- Bar text per the Text setting (location by default); the full cooldown
         -- list lives in the tooltip. On cooldown (or an unknown/secret one) it dims to gray.
         local cd, cdKnown = TravelGetPrimaryCooldown()
-        local location = TravelBarText(D().textMode, GetBindLocation() or "?", cd, cdKnown)
+        local location = TravelBarText(D(), GetBindLocation() or "?", cd, cdKnown)
         if isSide then
             local slotW = VSlotW(inst)
             local innerW = max(30, slotW - 8)
