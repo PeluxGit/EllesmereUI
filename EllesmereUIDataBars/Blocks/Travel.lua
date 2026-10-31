@@ -217,7 +217,9 @@ local function TravelGetRemainingCooldown(id, isSpell)
     if issecretvalue(startTime) or issecretvalue(duration) then
         return 0, false
     end
-    if type(startTime) == "number" and type(duration) == "number" and duration > 0 then
+    -- <= 2s is the global cooldown, which the item/spell APIs also report on
+    -- travel items while the player fights: not a travel cooldown, read as ready.
+    if type(startTime) == "number" and type(duration) == "number" and duration > 2 then
         return max(0, startTime + duration - GetTime()), true
     end
     return 0, true
@@ -387,7 +389,7 @@ local function TravelHouseCooldown()
     if not info or not info.isEnabled then return 0, true end
     if issecretvalue(info.startTime) or issecretvalue(info.duration) then return 0, false end
     local rem = 0
-    if (info.duration or 0) > 0 and (info.startTime or 0) > 0 then
+    if (info.duration or 0) > 2 and (info.startTime or 0) > 0 then
         rem = max(0, info.startTime + info.duration - GetTime())
     end
     return rem, true
@@ -591,18 +593,14 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             if #houses > 0 then
                 local hLabel = (#houses == 1) and houses[1].name or "Home"
                 local hstr, hready = "-", false
-                local info = C_Housing and C_Housing.GetVisitCooldownInfo and C_Housing.GetVisitCooldownInfo()
                 if TravelCanReturnHome() then
                     hstr, hready = "Return available", true
-                elseif not info or not info.isEnabled then
-                    hstr, hready = L["READY"], true
-                elseif not (issecretvalue(info.startTime) or issecretvalue(info.duration)) then
-                    local rem = 0
-                    if (info.duration or 0) > 0 and (info.startTime or 0) > 0 then
-                        rem = max(0, info.startTime + info.duration - GetTime())
+                else
+                    local rem, known = TravelHouseCooldown()
+                    if known then
+                        hstr = ns.FormatCooldown(rem) or L["READY"]
+                        hready = rem <= 0
                     end
-                    hstr = ns.FormatCooldown(rem) or L["READY"]
-                    hready = rem <= 0
                 end
                 local hg = hready and 1 or 0.65
                 local hr, hgr, hb = 0.5, 0.5, 0.5
@@ -818,7 +816,15 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             hearthText:SetTextColor(br, bgr, bb, 1); hearthIcon:SetVertexColor(ir, ig, ib, 1)
         end
 
-        if InCombatLockdown() then return end
+        -- The block is a secure button: no resize in combat. Text that changed
+        -- mid-fight may no longer fit the pre-combat layout, so re-lay it out
+        -- once combat ends (keyed: one pending pass per block).
+        if InCombatLockdown() then
+            ns.DeferUntilOOC("edbtravellayout:" .. inst.key, function()
+                if not inst._dead then inst:Refresh() end
+            end)
+            return
+        end
 
         -- +2 icon size, -2 gap: hearthstone runs bigger and tighter than default.
         local iconSz, gap = fontSize + 2, ICON_GAP - 2
