@@ -132,6 +132,73 @@ ns.TravelExtraIDs = TRAVEL_EXTRAS
 ns.TravelExtraUsable = function(id) return TravelExtraKind(id) ~= nil end
 ns.TravelEntryName = TravelEntryName
 
+-- Player housing (retail): owned houses arrive asynchronously through
+-- PLAYER_HOUSE_LIST_UPDATED after one C_Housing.GetPlayerOwnedHouses request.
+-- A click choice "house:<houseGUID>" fires Blizzard's teleporthome secure action
+-- (returnhome while a return trip is available).
+local HOUSE_PREFIX = "house:"
+local travelHouses            -- HouseInfo list, nil until the first event
+local travelHousesRequested
+local function TravelRequestHouses()
+    if travelHousesRequested then return end
+    if not (C_Housing and C_Housing.GetPlayerOwnedHouses) then return end
+    travelHousesRequested = true
+    C_Housing.GetPlayerOwnedHouses()
+end
+-- Retry on world entry when the login request went unanswered.
+function ns.TravelRetryHouses()
+    if travelHouses then return end
+    travelHousesRequested = nil
+    TravelRequestHouses()
+end
+ns.TravelRequestHouses = TravelRequestHouses
+
+local function TravelHouseGuid(choice)
+    if type(choice) ~= "string" then return nil end
+    if choice:sub(1, #HOUSE_PREFIX) ~= HOUSE_PREFIX then return nil end
+    return choice:sub(#HOUSE_PREFIX + 1)
+end
+
+local function TravelUsableHouse(h)
+    return h and h.houseGUID and h.neighborhoodGUID and h.plotID
+        and not issecretvalue(h.houseGUID) and not issecretvalue(h.neighborhoodGUID)
+end
+
+local function TravelFindHouse(guid)
+    if not (guid and travelHouses) then return nil end
+    for _, h in ipairs(travelHouses) do
+        if TravelUsableHouse(h) and h.houseGUID == guid then return h end
+    end
+    return nil
+end
+
+-- House name, skipping the opaque placeholder some clients report.
+local function TravelHouseName(h)
+    local n = h and h.houseName
+    if n and not issecretvalue(n) and n ~= "" and not n:match("^Home%-opaque%-%d+$") then return n end
+    return "Home"
+end
+
+local function TravelCanReturnHome()
+    local f = C_HousingNeighborhood and C_HousingNeighborhood.CanReturnAfterVisitingHouse
+    if not f then return false end
+    local ok, can = pcall(f)
+    return ok and can == true
+end
+
+-- Options-side: owned houses as { key = "house:<guid>", name = ... }.
+function ns.TravelHouseChoices()
+    local out = {}
+    if travelHouses then
+        for _, h in ipairs(travelHouses) do
+            if TravelUsableHouse(h) then
+                out[#out + 1] = { key = HOUSE_PREFIX .. h.houseGUID, name = TravelHouseName(h) }
+            end
+        end
+    end
+    return out
+end
+
 -- Returns remaining, known. In restricted combat cooldown numbers are SECRET: comparing
 -- or dead-reckoning them throws (type() still says "number"), so those report 0, false and
 -- callers degrade -- tooltip "-" on gray rows, block tints as cooling, probe keeps ticking and self-corrects on a clean read.
@@ -225,6 +292,11 @@ local TRAVEL_DESTINATIONS = {
 -- hearthstone), a name string for a travel entry, nil for "none".
 local function TravelChoiceDestination(choice)
     if choice == "none" then return nil end
+    local houseGuid = TravelHouseGuid(choice)
+    if houseGuid then
+        local h = TravelFindHouse(houseGuid)
+        return h and TravelHouseName(h) or true
+    end
     if type(choice) ~= "number" or choice == 556 then return true end
     if not TRAVEL_EXTRA_SET[choice] or not TravelExtraKind(choice) then return true end
     local d = TRAVEL_DESTINATIONS[choice]
@@ -272,6 +344,21 @@ end
 -- True when the bar text changes every second while cooling.
 local function TravelTextShowsTimer(mode)
     return mode == "smart" or mode == "both" or mode == "cooldown"
+end
+
+-- Tooltip click-hint text for a choice.
+local function TravelChoiceLabel(choice)
+    if choice == "random" then return L["RANDOM_HEARTHSTONE"] end
+    local houseGuid = TravelHouseGuid(choice)
+    if houseGuid then
+        local h = TravelFindHouse(houseGuid)
+        if h then
+            if TravelCanReturnHome() then return "Return from Home" end
+            return TravelHouseName(h)
+        end
+        return L["USE_HEARTHSTONE"]
+    end
+    return TravelEntryName(choice) or L["USE_HEARTHSTONE"]
 end
 
 -- Id a click choice fires right now; nil for "none" or when nothing is usable.
@@ -342,7 +429,9 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
     -- hearth start IS a player cast, and BAG_UPDATE_COOLDOWN measured
     -- idle-chatty (~0.7 Hz ambient with nothing cooling).
     inst.events = { "HEARTHSTONE_BOUND", "PLAYER_ENTERING_WORLD",
-        "BAG_UPDATE_DELAYED", "SPELLS_CHANGED" }
+        "BAG_UPDATE_DELAYED", "SPELLS_CHANGED",
+        -- Owned-house list for the housing click choice (retail; pcall-registered, so absent events are skipped).
+        "PLAYER_HOUSE_LIST_UPDATED" }
 
     local _trvFitBuf1 = { "" }
     local _trvFitBuf2 = { "" }
@@ -448,6 +537,34 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             end
         end
 
+        -- Home row (owners only): the shared house-visit cooldown, display only.
+        -- One house shows its name, several share one "Home" row (one cooldown).
+        do
+            local houses = ns.TravelHouseChoices()
+            if #houses > 0 then
+                local hLabel = (#houses == 1) and houses[1].name or "Home"
+                local hstr, hready = "-", false
+                local info = C_Housing and C_Housing.GetVisitCooldownInfo and C_Housing.GetVisitCooldownInfo()
+                if TravelCanReturnHome() then
+                    hstr, hready = "Return available", true
+                elseif not info or not info.isEnabled then
+                    hstr, hready = L["READY"], true
+                elseif not (issecretvalue(info.startTime) or issecretvalue(info.duration)) then
+                    local rem = 0
+                    if (info.duration or 0) > 0 and (info.startTime or 0) > 0 then
+                        rem = max(0, info.startTime + info.duration - GetTime())
+                    end
+                    hstr = ns.FormatCooldown(rem) or L["READY"]
+                    hready = rem <= 0
+                end
+                local hg = hready and 1 or 0.65
+                local hr, hgr, hb = 0.5, 0.5, 0.5
+                if hready then hr, hgr, hb = 0, 1, 0 end
+                ns.Tip_AddDouble(hLabel, hstr, hg, hg, hg, hr, hgr, hb)
+                ns.Tip_PadRow()
+            end
+        end
+
         -- Show M+ Portals: nil reads as shown (no migration needed). OFF skips the section and its spell-resolution work entirely.
         -- WoW Forever has no Mythic+ teleports: the section never builds there.
         _mythicLineCount = 0
@@ -515,12 +632,7 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         for btn = 1, 3 do
             local choice = TravelClickChoice(dt, btn)
             if choice ~= "none" then
-                local what
-                if choice == "random" then
-                    what = L["RANDOM_HEARTHSTONE"]
-                else
-                    what = TravelEntryName(choice) or L["USE_HEARTHSTONE"]
-                end
+                local what = TravelChoiceLabel(choice)
                 local label = (btn == 1 and L["LEFT_CLICK"]) or (btn == 2 and L["RIGHT_CLICK"]) or "|cffFFFFFFMiddle Click:|r"
                 ns.Tip_AddDouble(label, what, 1, 1, 1, ar, ag, ab)
             end
@@ -556,9 +668,25 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             local dt = D()
             -- Each button: "none" (empty macro), "random" (rolled per seed) or an id;
             -- an id no longer owned/known falls back to the plain hearthstone.
+            -- A house choice uses Blizzard's housing secure actions (per-button
+            -- house attributes); a house no longer owned or not loaded yet falls
+            -- back to the hearthstone macro.
+            local canReturn
             for btn = 1, 3 do
-                local id = TravelResolveChoice(TravelClickChoice(dt, btn))
-                hearthButton:SetAttribute("*macrotext" .. btn, id and TravelBuildMacro(id) or "")
+                local choice = TravelClickChoice(dt, btn)
+                local house = TravelFindHouse(TravelHouseGuid(choice))
+                if house then
+                    if canReturn == nil then canReturn = TravelCanReturnHome() end
+                    hearthButton:SetAttribute("*type" .. btn, canReturn and "returnhome" or "teleporthome")
+                    hearthButton:SetAttribute("*house-neighborhood-guid" .. btn, house.neighborhoodGUID)
+                    hearthButton:SetAttribute("*house-guid" .. btn, house.houseGUID)
+                    hearthButton:SetAttribute("*house-plot-id" .. btn, house.plotID)
+                    hearthButton:SetAttribute("*macrotext" .. btn, "")
+                else
+                    hearthButton:SetAttribute("*type" .. btn, "macro")
+                    local id = TravelResolveChoice(choice)
+                    hearthButton:SetAttribute("*macrotext" .. btn, id and TravelBuildMacro(id) or "")
+                end
             end
         end
 
@@ -585,6 +713,8 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
 
         -- Seed macrotext shortly after build so a first-combat click works.
         C_Timer.After(1, SeedMacro)
+        inst._seedClicks = SeedMacro
+        TravelRequestHouses()
     end
 
     -- Combat-deferred construction: dimmed non-interactive icon until OOC.
@@ -729,7 +859,14 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         end
     end
 
-    inst.eventFrame = MakeEventFrame(inst, function(self, event)
+    inst.eventFrame = MakeEventFrame(inst, function(self, event, ...)
+        if event == "PLAYER_HOUSE_LIST_UPDATED" then
+            travelHouses = ...
+            if self._seedClicks and not InCombatLockdown() then self._seedClicks() end
+            self:Refresh()
+            return
+        end
+        if event == "PLAYER_ENTERING_WORLD" then ns.TravelRetryHouses() end
         if event == "UNIT_SPELLCAST_SUCCEEDED" then
             -- Cooldown-START lane (player casts only; every hearth start is
             -- one): never invalidates the hearthstone pick, and while the
