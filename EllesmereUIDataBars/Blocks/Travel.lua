@@ -56,12 +56,30 @@ local HEARTHSTONE_IDS = {
 -- when owned. Each has its OWN cooldown, separate from the shared hearthstone
 -- one -- why Astral Recall is here, not the pool above, despite also returning
 -- to the bind point. Spell IDs: Dalaran 222695, Arcantina 1255801, Garrison 171253.
+-- Also the travel half of the click-choice dropdowns (same set as XIV_Databar's).
 local TRAVEL_EXTRAS = {
+    128353,  -- Admiral's Compass (a plain item, not a toy)
     140192,  -- Dalaran Hearthstone
     253629,  -- Key to the Arcantina
     110560,  -- Garrison Hearthstone
     556,     -- Astral Recall (a spell, hence the per-entry kind probe below)
+    193753,  -- Dreamwalk (druid)
+    18960,   -- Teleport: Moonglade (druid, only without Dreamwalk)
+    50977,   -- Death Gate (death knight)
+    193759,  -- Teleport: Hall of the Guardian (mage)
+    126892,  -- Zen Pilgrimage (monk)
+    1238686, -- Haranir racial teleport
 }
+-- Entries that are spells: names come from the spell API even when unknown.
+local TRAVEL_EXTRA_SPELLS = {
+    [556] = true, [193753] = true, [18960] = true, [50977] = true,
+    [193759] = true, [126892] = true, [1238686] = true,
+}
+-- Entry hidden while the player knows its replacement.
+local TRAVEL_EXTRA_SUPERSEDED_BY = { [18960] = 193753 }
+
+local HEARTHSTONE_SET = {}
+for _, id in ipairs(HEARTHSTONE_IDS) do HEARTHSTONE_SET[id] = true end
 
 -- Hearthstones share one cooldown, so polling a single owned one suffices.
 -- Engine-level cache: the underlying cooldown is shared game-wide.
@@ -74,9 +92,45 @@ local function TravelIsUsable(id)
     return (C_Item and C_Item.GetItemCount and C_Item.GetItemCount(id) or 0) > 0
 end
 
--- Options-side exports: the hearthstone dropdown lists owned pool entries.
+local TRAVEL_EXTRA_SET = {}
+for _, id in ipairs(TRAVEL_EXTRAS) do TRAVEL_EXTRA_SET[id] = true end
+
+-- Travel entry kind for the player: "toy", "spell", "item" or nil (not owned/known).
+local function TravelExtraKind(id)
+    local sup = TRAVEL_EXTRA_SUPERSEDED_BY[id]
+    if sup and IsPlayerSpell(sup) then return nil end
+    if TRAVEL_EXTRA_SPELLS[id] then
+        return IsPlayerSpell(id) and "spell" or nil
+    end
+    if PlayerHasToy(id) then return "toy" end
+    if (C_Item and C_Item.GetItemCount and C_Item.GetItemCount(id) or 0) > 0 then return "item" end
+    return nil
+end
+
+-- Display name for any click choice id (hearthstone, travel item or spell); nil on a cold cache.
+local function TravelEntryName(id)
+    if TRAVEL_EXTRA_SPELLS[id] then
+        local info = C_Spell.GetSpellInfo(id)
+        return info and info.name
+    end
+    if C_ToyBox and C_ToyBox.GetToyInfo then
+        local _, tn = C_ToyBox.GetToyInfo(id)
+        if tn then return tn end
+    end
+    if C_Item and C_Item.GetItemNameByID then
+        local n = C_Item.GetItemNameByID(id)
+        if n then return n end
+    end
+    if C_Item and C_Item.GetItemInfo then return (C_Item.GetItemInfo(id)) end
+    return nil
+end
+
+-- Options-side exports: the click dropdowns list owned pool and travel entries.
 ns.TravelHearthstoneIDs = HEARTHSTONE_IDS
 ns.TravelIsUsable = TravelIsUsable
+ns.TravelExtraIDs = TRAVEL_EXTRAS
+ns.TravelExtraUsable = function(id) return TravelExtraKind(id) ~= nil end
+ns.TravelEntryName = TravelEntryName
 
 -- Returns remaining, known. In restricted combat cooldown numbers are SECRET: comparing
 -- or dead-reckoning them throws (type() still says "number"), so those report 0, false and
@@ -131,6 +185,41 @@ local function TravelPickHearthstone(randomize)
     if randomize then return list[mrandom(#list)] end
     for _, id in ipairs(list) do if id == 6948 then return id end end
     return list[1]
+end
+
+-- Stored click choice per mouse button (1 left, 2 right, 3 middle): "none", "random"
+-- or an id. Left keeps the legacy randomizeHs fallback; right defaults to random,
+-- middle to none.
+local function TravelClickChoice(dt, btn)
+    local c
+    if btn == 1 then
+        c = dt.hsChoice
+        if c == nil then c = dt.randomizeHs and "random" or 6948 end
+    elseif btn == 2 then
+        c = dt.hsChoiceRight
+        if c == nil then c = "random" end
+    else
+        c = dt.hsChoiceMiddle
+        if c == nil then c = "none" end
+    end
+    return c
+end
+ns.TravelClickChoice = TravelClickChoice
+
+-- Id a click choice fires right now; nil for "none" or when nothing is usable.
+-- A chosen entry that is no longer owned or known falls back to the plain
+-- hearthstone, as the left click always has.
+local function TravelResolveChoice(choice)
+    if choice == "none" then return nil end
+    if choice == "random" then return TravelPickHearthstone(true) end
+    if type(choice) == "number" then
+        if TRAVEL_EXTRA_SET[choice] then
+            if TravelExtraKind(choice) then return choice end
+        elseif TravelIsUsable(choice) then
+            return choice
+        end
+    end
+    return TravelPickHearthstone(false)
 end
 
 -- Negative-result cache: with NO usable hearthstone the 1s cooling probe would re-scan all
@@ -233,11 +322,11 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         local hsLabel = L["HEARTHSTONE"] .. " (" .. (GetBindLocation() or "?") .. ")"
         local hsMacro
         if ready then
-            local dt = D()
-            local choice = dt.hsChoice
-            if choice == nil then choice = dt.randomizeHs and "random" or 6948 end
+            -- Always a hearthstone: the left-click choice when it is one, else a random
+            -- or plain one (a travel entry picked for left click has its own row below).
+            local choice = TravelClickChoice(D(), 1)
             local hsId
-            if choice ~= "random" and TravelIsUsable(choice) then
+            if HEARTHSTONE_SET[choice] and TravelIsUsable(choice) then
                 hsId = choice
             else
                 hsId = TravelPickHearthstone(choice == "random")
@@ -255,23 +344,12 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         -- Travel entries ride the same section, each with its own cooldown. A spell entry
         -- takes the spell-side name/cooldown/click overlay, and IsPlayerSpell gates it to its
         -- class. Name lookups can be nil on a cold cache: the row appears on the next tooltip refresh.
+        -- Plain items (Admiral's Compass) take the macro overlay with the block's own /use macro.
         for _, entryId in ipairs(TRAVEL_EXTRAS) do
-            local isToy   = PlayerHasToy(entryId)
-            local isSpell = not isToy and IsPlayerSpell(entryId)
-            if isToy or isSpell then
-                local entryName
-                if isSpell then
-                    local sInfo = C_Spell.GetSpellInfo(entryId)
-                    entryName = sInfo and sInfo.name
-                else
-                    if C_ToyBox and C_ToyBox.GetToyInfo then
-                        local _, tn = C_ToyBox.GetToyInfo(entryId)
-                        entryName = tn
-                    end
-                    if not entryName and C_Item and C_Item.GetItemInfo then
-                        entryName = C_Item.GetItemInfo(entryId)
-                    end
-                end
+            local kind    = TravelExtraKind(entryId)
+            local isSpell = kind == "spell"
+            if kind then
+                local entryName = TravelEntryName(entryId)
                 if entryName then
                     local tcd, tKnown = TravelGetRemainingCooldown(entryId, isSpell)
                     local tstr
@@ -287,9 +365,13 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
                     if tready then
                         -- Ready: click-to-use, same secure overlay contract as the M+ rows
                         -- (degrades to text in combat). Both helpers take the same args; only the seeded secure attribute differs.
-                        local AddActionRow = isSpell and ns.Tip_AddActionDouble
-                                                      or ns.Tip_AddToyActionDouble
-                        AddActionRow(entryName, tstr, entryId, 1, 1, 1, tr, tg, tb)
+                        if kind == "item" then
+                            ns.Tip_AddMacroActionDouble(entryName, tstr, TravelBuildMacro(entryId), 1, 1, 1, tr, tg, tb)
+                        else
+                            local AddActionRow = isSpell and ns.Tip_AddActionDouble
+                                                          or ns.Tip_AddToyActionDouble
+                            AddActionRow(entryName, tstr, entryId, 1, 1, 1, tr, tg, tb)
+                        end
                     else
                         -- On cooldown: same gray as the M+ "On Cooldown" label.
                         ns.Tip_AddDouble(entryName, tstr, 0.65, 0.65, 0.65, tr, tg, tb)
@@ -360,8 +442,21 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             end
         end
         ns.Tip_AddLine(" ")
-        ns.Tip_AddDouble(L["LEFT_CLICK"], L["USE_HEARTHSTONE"], 1, 1, 1, ar, ag, ab)
-        ns.Tip_AddDouble(L["RIGHT_CLICK"], L["RANDOM_HEARTHSTONE"], 1, 1, 1, ar, ag, ab)
+        -- Click hints name each button's configured choice; middle is listed only when set.
+        local dt = D()
+        for btn = 1, 3 do
+            local choice = TravelClickChoice(dt, btn)
+            if choice ~= "none" then
+                local what
+                if choice == "random" then
+                    what = L["RANDOM_HEARTHSTONE"]
+                else
+                    what = TravelEntryName(choice) or L["USE_HEARTHSTONE"]
+                end
+                local label = (btn == 1 and L["LEFT_CLICK"]) or (btn == 2 and L["RIGHT_CLICK"]) or "|cffFFFFFFMiddle Click:|r"
+                ns.Tip_AddDouble(label, what, 1, 1, 1, ar, ag, ab)
+            end
+        end
         ns.Tip_Show()
     end
 
@@ -375,14 +470,14 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         -- ActionButtonUseKeyDown CVar fire the macro twice (2nd /use cancels the cast).
         hearthButton:SetAllPoints()
         hearthButton:EnableMouse(true)
-        hearthButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        hearthButton:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp")
         hearthButton:SetAttribute("useOnKeyDown", false)
         -- One explicit pair per button rather than an unsuffixed fallback:
-        -- 1 = the chosen hearthstone, 2 = always a random one.
-        hearthButton:SetAttribute("*type1", "macro")
-        hearthButton:SetAttribute("*macrotext1", "")
-        hearthButton:SetAttribute("*type2", "macro")
-        hearthButton:SetAttribute("*macrotext2", "")
+        -- 1 = left, 2 = right, 3 = middle, each from its own click choice.
+        for btn = 1, 3 do
+            hearthButton:SetAttribute("*type" .. btn, "macro")
+            hearthButton:SetAttribute("*macrotext" .. btn, "")
+        end
 
         hearthIcon   = hearthButton:CreateTexture(nil, "OVERLAY")
         hearthText   = hearthButton:CreateFontString(nil, "OVERLAY")
@@ -391,23 +486,12 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         local function SeedMacro()
             if InCombatLockdown() then return end
             local dt = D()
-            -- Hearthstone choice: "random" or a pool item id. nil derives from
-            -- the randomizeHs boolean (nil/false = plain hearthstone preferred).
-            local choice = dt.hsChoice
-            if choice == nil then
-                choice = dt.randomizeHs and "random" or 6948
+            -- Each button: "none" (empty macro), "random" (rolled per seed) or an id;
+            -- an id no longer owned/known falls back to the plain hearthstone.
+            for btn = 1, 3 do
+                local id = TravelResolveChoice(TravelClickChoice(dt, btn))
+                hearthButton:SetAttribute("*macrotext" .. btn, id and TravelBuildMacro(id) or "")
             end
-            local id
-            if choice ~= "random" and TravelIsUsable(choice) then
-                id = choice
-            else
-                -- Random pick, or fallback when the chosen hearthstone is no longer owned/usable.
-                id = TravelPickHearthstone(choice == "random")
-            end
-            if id then hearthButton:SetAttribute("*macrotext1", TravelBuildMacro(id)) end
-            -- Right click ignores the choice and always rolls its own.
-            local rid = TravelPickHearthstone(true)
-            if rid then hearthButton:SetAttribute("*macrotext2", TravelBuildMacro(rid)) end
         end
 
         -- Reseed on every PreClick (OOC only) so the button always fires the currently
