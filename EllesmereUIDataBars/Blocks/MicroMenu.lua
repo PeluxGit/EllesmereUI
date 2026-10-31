@@ -749,7 +749,7 @@ local function MMBuildGuildTip()
 
     local shown, hidden = 0, 0
     for i = 1, GetNumGuildMembers() do
-        local name, _, _, level, _, zone, _, _, isOnline, status, class = GetGuildRosterInfo(i)
+        local name, _, _, level, _, zone, note, _, isOnline, status, class = GetGuildRosterInfo(i)
         if isOnline and shown >= MM_TIP_MAX_ROWS then
             hidden = hidden + 1
         elseif isOnline then
@@ -763,6 +763,11 @@ local function MMBuildGuildTip()
             local cn  = name and name:match("[^-]+") or "?"
             -- Left plain (no |c): the class color rides the left-color args so the hover recolor to accent shows, like the M+ teleport rows.
             local left  = format("%s  %s %s", level or "", cn, st)
+            -- Public note after the name, XIV_Databar style: gold text in white parentheses.
+            -- Its own color codes keep it gold while the rest of the row takes the hover accent.
+            if note and note ~= "" then
+                left = left .. " |cffffffff(|r|cffecd672" .. note .. "|r|cffffffff)|r"
+            end
             local fname = name
             ns.Tip_AddClickable(left, zone or "", function(mouseButton)
                 if not fname then return end
