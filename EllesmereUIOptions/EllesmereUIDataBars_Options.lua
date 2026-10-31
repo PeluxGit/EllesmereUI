@@ -3136,10 +3136,21 @@ initFrame:SetScript("OnEvent", function(self)
                     "What right click on the Travel block uses. Defaults to Random Hearthstone.",
                     "What middle click on the Travel block uses. None leaves middle click unused.",
                 }
-                typeRows = {}
+                typeRows = {
+                    { type = "dropdown", text = "Text",
+                      tooltip = "What the Travel block shows next to its icon. The timer is the shared hearthstone cooldown; other travel items keep their own cooldowns in the tooltip.",
+                      values = { location = "Bind Location", smart = "Cooldown, Else Location",
+                                 both = "Location and Cooldown", cooldown = "Cooldown Only", none = "None" },
+                      order = { "location", "smart", "both", "cooldown", "none" },
+                      getValue = function() return s.textMode or "location" end,
+                      setValue = function(v)
+                          if v == "location" then s.textMode = nil else s.textMode = v end
+                          Apply()
+                      end },
+                }
                 for btn = 1, 3 do
                     local vals, ord = BuildClickValues(btn)
-                    typeRows[btn] = { type = "dropdown", text = CLICK_LABELS[btn],
+                    typeRows[#typeRows + 1] = { type = "dropdown", text = CLICK_LABELS[btn],
                       tooltip = CLICK_TIPS[btn],
                       values = vals, order = ord,
                       getValue = function() return ChoiceOf(btn) end,

@@ -206,6 +206,25 @@ local function TravelClickChoice(dt, btn)
 end
 ns.TravelClickChoice = TravelClickChoice
 
+-- Bar text by settings.textMode: "location" (nil, default), "smart" (cooldown while
+-- cooling, else location), "both", "cooldown" or "none". cd/cdKnown come from
+-- TravelGetPrimaryCooldown; an unknown (secret) cooldown shows no time.
+local function TravelBarText(mode, location, cd, cdKnown)
+    if mode == "none" then return "" end
+    if mode == nil or mode == "location" then return location end
+    local cdStr = cdKnown and ns.FormatCooldown(cd) or nil
+    if mode == "smart" then return cdStr or location end
+    if mode == "both" then return cdStr and (location .. " " .. cdStr) or location end
+    -- "cooldown"
+    if cdStr then return cdStr end
+    return cdKnown and L["READY"] or "-"
+end
+
+-- True when the bar text changes every second while cooling.
+local function TravelTextShowsTimer(mode)
+    return mode == "smart" or mode == "both" or mode == "cooldown"
+end
+
 -- Id a click choice fires right now; nil for "none" or when nothing is usable.
 -- A chosen entry that is no longer owned or known falls back to the plain
 -- hearthstone, as the left click always has.
@@ -543,7 +562,10 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         local fontSize = max(9, floor(CONTENT_BASE * 0.4333 + 0.5))
         local isSide = barCtx.IsVertical()
 
-        local location = GetBindLocation() or "?"
+        -- Bar text per the Text setting (location by default); the full cooldown
+        -- list lives in the tooltip. On cooldown (or an unknown/secret one) it dims to gray.
+        local cd, cdKnown = TravelGetPrimaryCooldown()
+        local location = TravelBarText(D().textMode, GetBindLocation() or "?", cd, cdKnown)
         if isSide then
             local slotW = VSlotW(inst)
             local innerW = max(30, slotW - 8)
@@ -555,9 +577,6 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
 
         hearthText:SetText(location)
 
-        -- Block renders only icon + bind location; remaining cooldown lives in
-        -- the tooltip. On cooldown (or an unknown/secret one) it dims to gray.
-        local cd, cdKnown = TravelGetPrimaryCooldown()
         inst._lastCooling = (not cdKnown) or cd > 0
         TravelSyncTicker(mouseOver or inst._lastCooling)
 
@@ -611,6 +630,8 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
             hearthIcon:SetSize(iconSz, iconSz)
             ns.ResetInlineText(hearthText, "LEFT")
             local tw = ns.SnapToPixelGrid(hearthText:GetStringWidth())
+            -- Text None: icon only, no text gap.
+            if location == "" then tw = 0; gap = 0 end
             local totalW = min(slotW, iconSz + gap + tw + 4)
             content:SetSize(totalW, barH)
             hearthButton:SetSize(totalW, barH)
@@ -635,6 +656,9 @@ ns.BlockFactories.travel = function(blockCfg, slot, content, barCtx)
         local cooling = (not pKnown) or pcd > 0
         if cooling ~= inst._lastCooling then
             inst._lastCooling = cooling
+            inst:Refresh()
+        elseif cooling and pKnown and TravelTextShowsTimer(D().textMode) then
+            -- Timer text on the bar: repaint each second while cooling.
             inst:Refresh()
         elseif not cooling and not mouseOver then
             -- Settled ready with no edge to paint: nothing left to watch.
